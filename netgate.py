@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from multiprocessing.context import AuthenticationError
 from multiprocessing.connection import Client, Listener
 
+from .auth import issue_capability, load_key
 from .ipc import IPCClient, ROLE_OFFSETS
 from .pki import PKIError, PKI_IDENTITIES, sign_message, verify_message
 
@@ -335,13 +336,27 @@ class NetworkGateway:
             # ``Listener.accept()`` (authkey=REMOTE_AUTHKEY) already performed the
             # transport handshake; the PKI-signed envelopes are the real authority.
             incoming = connection.recv()
-            verify_message(incoming, self.allowed_identities)
+            identity = verify_message(incoming, self.allowed_identities)
             target = str((incoming.get("payload") or {}).get("_remote_target") or "core").strip().lower()
             if target not in ROLE_OFFSETS:
                 raise PKIError("invalid remote target role")
-            local = IPCClient(target, timeout_seconds=15.0, identity=GATEWAY_IDENTITY)
+            payload = dict(incoming.get("payload") or {})
+            remote_scopes = payload.pop("_remote_scopes", None)
+            payload.pop("_remote_target", None)
             forwarded = dict(incoming)
-            forwarded["authorization"] = incoming.get("authorization", {})
+            forwarded["payload"] = payload
+            # The gateway is the trusted Mac-side intermediary. Issue a fresh
+            # capability with the Mac's IPC key for the scopes the client
+            # requested, so machine-local protected commands verify against the
+            # Mac key without ever transferring it to the client.
+            if remote_scopes:
+                forwarded["authorization"] = issue_capability(
+                    load_key(), subject=identity,
+                    scopes=[str(s) for s in remote_scopes], lifetime_seconds=120,
+                )
+            else:
+                forwarded["authorization"] = incoming.get("authorization", {})
+            local = IPCClient(target, timeout_seconds=15.0, identity=GATEWAY_IDENTITY)
             reply = local.send(forwarded)
             connection.send(reply)
         except (PKIError, EOFError, BrokenPipeError, ConnectionResetError, OSError):
