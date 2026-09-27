@@ -20,17 +20,28 @@ AGENT_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs/fgo"
 mkdir -p "$AGENT_DIR" "$LOG_DIR"
 
-# Stop any service_host currently running in manual Terminal windows so the
-# agents take over cleanly (no duplicate cores/gateways fighting for ports).
+# Stop any service_host currently running (manual Terminal instances, or the
+# broken core from an earlier load) so the agents take over cleanly.
 pkill -f "firstgeneralorder.service_host" 2>/dev/null || true
 sleep 1
 
+# Emit --role/core as separate argv entries. launchd passes each <string> as one
+# argument; a single "--role core" token is rejected by argparse.
 write_agent() {
-  local role="$1" extra="$2"
+  local role="$1"
   local label="com.firstgeneralorder.$role"
   local plist="$AGENT_DIR/$label.plist"
   if [ "$role" = "gateway" ]; then
-    extra="--gateway"
+    ARGS='    <string>'$PYBIN'</string>
+    <string>-m</string>
+    <string>firstgeneralorder.service_host</string>
+    <string>--gateway</string>'
+  else
+    ARGS='    <string>'$PYBIN'</string>
+    <string>-m</string>
+    <string>firstgeneralorder.service_host</string>
+    <string>--role</string>
+    <string>'$role'</string>'
   fi
   cat > "$plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -40,10 +51,7 @@ write_agent() {
   <key>Label</key><string>$label</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$PYBIN</string>
-    <string>-m</string>
-    <string>firstgeneralorder.service_host</string>
-    <string>$extra</string>
+$ARGS
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -62,6 +70,6 @@ EOF
   echo "loaded $label"
 }
 
-write_agent core "--role core"
-write_agent gateway "--gateway"
+write_agent core
+write_agent gateway
 echo "DONE. core + gateway auto-start at login and auto-restart."
