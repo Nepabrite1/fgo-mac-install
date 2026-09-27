@@ -1,42 +1,48 @@
 #!/bin/bash
-# FGO Mac setup: install the newest core.py + streamgate.py into the CORRECT
-# folders, clear stale caches, and restart core + gateway.
-# Run ON the Mac:   bash ~/Downloads/fix-stream-mac.sh
+# FGO Mac setup: install the NEWEST core.py + streamgate.py + netgate.py into
+# the correct folders, clear stale caches, and restart core + gateway.
+# Picks the newest matching file so Safari's "core-2.py"/"core (2).py" renaming
+# can never install a stale copy. Run on the Mac:
+#   bash $(ls -t ~/Downloads/*fix-stream-mac*.sh | head -1)
 set -u
 
 SRC="$HOME/fgo/app-source/firstgeneralorder"
 DL="$HOME/Downloads"
-
 say() { echo "== $*"; }
 
-# Return the newest existing file among the given candidates (handles the
-# "core (1).py" Safari rename problem).
+# Newest existing file among the given names (by mtime).
 pick_newest() {
   local newest="" newest_t=0 f t
   for f in "$@"; do
-    if [ -f "$f" ]; then
-      t=$(stat -f %m "$f")
-      if [ -n "$t" ] && [ "$t" -gt "$newest_t" ]; then newest="$f"; newest_t="$t"; fi
-    fi
+    [ -f "$f" ] || continue
+    t=$(stat -f %m "$f")
+    if [ -n "$t" ] && [ "$t" -gt "$newest_t" ]; then newest="$f"; newest_t="$t"; fi
   done
   printf '%s' "$newest"
 }
 
-f=$(pick_newest "$DL"/core.py "$DL"/core\ \(1\).py "$DL"/core\ \(2\).py "$DL"/core\ \(3\).py)
+f=$(pick_newest "$DL"/core*.py)
 if [ -n "$f" ]; then
   cp "$f" "$SRC/services/core.py" && say "installed core.py <- $f"
 else
-  say "!! core.py not found in $DL -- download it from the repo first"
+  say "!! no core*.py in $DL -- download core.py from the repo first"
 fi
 
-f=$(pick_newest "$DL"/streamgate.py "$DL"/streamgate\ \(1\).py "$DL"/streamgate\ \(2\).py "$DL"/streamgate\ \(3\).py)
+f=$(pick_newest "$DL"/streamgate*.py)
 if [ -n "$f" ]; then
   cp "$f" "$SRC/streamgate.py" && say "installed streamgate.py <- $f"
 else
-  say "!! streamgate.py not found in $DL -- download it from the repo first"
+  say "!! no streamgate*.py in $DL -- download streamgate.py from the repo first"
 fi
 
-# Remove the wrongly-placed top-level core.py if it exists (it belongs in services/)
+f=$(pick_newest "$DL"/netgate*.py)
+if [ -n "$f" ]; then
+  cp "$f" "$SRC/netgate.py" && say "installed netgate.py <- $f"
+else
+  say "!! no netgate*.py in $DL -- download netgate.py from the repo first"
+fi
+
+# Remove the wrongly-placed top-level core.py if present (it belongs in services/)
 rm -f "$SRC/core.py"
 
 say "clearing stale bytecode caches"
@@ -48,4 +54,4 @@ launchctl kickstart -k gui/501/com.firstgeneralorder.core
 say "restarting gateway"
 launchctl kickstart -k gui/501/com.firstgeneralorder.gateway
 
-say "DONE - core now running streaming code"
+say "DONE - core, streamgate, and netgate installed; core + gateway restarted"
