@@ -1,7 +1,9 @@
 #!/bin/bash
-# FGO auto-start (macOS LaunchAgents). Runs core + gateway as the logged-in user
-# with KeepAlive so they auto-start at login and auto-restart if they stop.
-# No sudo needed. Logs go to ~/Library/Logs/fgo/
+# FGO auto-start (macOS LaunchAgents). Starts all services + the gateway as the
+# logged-in user. core/gateway/map/distance/connect/supervisor keep alive and
+# auto-restart; ai/media start once at login (no auto-restart) so missing heavy
+# libs on an Intel Mac don't create restart loops. No sudo needed.
+# Logs go to ~/Library/Logs/fgo/
 set -e
 
 SRC="$HOME/fgo/app-source"
@@ -20,15 +22,13 @@ AGENT_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs/fgo"
 mkdir -p "$AGENT_DIR" "$LOG_DIR"
 
-# Stop any service_host currently running (manual Terminal instances, or the
-# broken core from an earlier load) so the agents take over cleanly.
+# Stop any service_host currently running so the agents take over cleanly.
 pkill -f "firstgeneralorder.service_host" 2>/dev/null || true
 sleep 1
 
-# Emit --role/core as separate argv entries. launchd passes each <string> as one
-# argument; a single "--role core" token is rejected by argparse.
 write_agent() {
   local role="$1"
+  local keepalive="$2"   # true | false
   local label="com.firstgeneralorder.$role"
   local plist="$AGENT_DIR/$label.plist"
   if [ "$role" = "gateway" ]; then
@@ -59,7 +59,7 @@ $ARGS
   </dict>
   <key>WorkingDirectory</key><string>$SRC</string>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
+  <key>KeepAlive</key><$keepalive/>
   <key>StandardOutPath</key><string>$LOG_DIR/$role.out.log</string>
   <key>StandardErrorPath</key><string>$LOG_DIR/$role.err.log</string>
 </dict>
@@ -70,6 +70,12 @@ EOF
   echo "loaded $label"
 }
 
-write_agent core
-write_agent gateway
-echo "DONE. core + gateway auto-start at login and auto-restart."
+write_agent core true
+write_agent gateway true
+write_agent map true
+write_agent distance true
+write_agent connect true
+write_agent supervisor true
+write_agent ai false
+write_agent media false
+echo "DONE. All services loaded. core/gateway/map/distance/connect/supervisor auto-restart; ai/media start once at login."
