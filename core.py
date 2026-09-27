@@ -153,8 +153,8 @@ class CoreService(BaseService):
             "stream": int(row["stream"] or 2), "buffer_width": int(row["buffer_width"] or 1280), "buffer_fps": int(row["buffer_fps"] or 8),
             "connected": bool(row["connected"]), "patrol_enabled": bool(row["patrol_enabled"]),
             "patrol_suspended": bool(row["patrol_suspended"]), "ptz_owner": row["ptz_owner"],
-            "floor_id": row["floor_id"], "orientation": json.loads(row["orientation_json"]),
-            "capabilities": json.loads(row["capability_json"]), "updated_at": row["updated_at"],
+            "floor_id": row["floor_id"], "orientation": json.loads(row["orientation_json"] or "{}"),
+            "capabilities": json.loads(row["capability_json"] or "{}"), "updated_at": row["updated_at"],
         }
 
     def _camera_rows(self) -> list[dict]:
