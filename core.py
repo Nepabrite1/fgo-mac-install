@@ -150,7 +150,7 @@ class CoreService(BaseService):
             "camera_id": row["camera_id"], "name": row["name"], "enabled": bool(row["enabled"]),
             "provider": row["provider"], "host": row["host"], "port": int(row["port"]),
             "username": row["username"],
-            "stream": int(row["stream"]), "buffer_width": int(row["buffer_width"]), "buffer_fps": int(row["buffer_fps"]),
+            "stream": int(row["stream"] or 2), "buffer_width": int(row["buffer_width"] or 1280), "buffer_fps": int(row["buffer_fps"] or 8),
             "connected": bool(row["connected"]), "patrol_enabled": bool(row["patrol_enabled"]),
             "patrol_suspended": bool(row["patrol_suspended"]), "ptz_owner": row["ptz_owner"],
             "floor_id": row["floor_id"], "orientation": json.loads(row["orientation_json"]),
@@ -299,11 +299,17 @@ class CoreService(BaseService):
         tilt = float(incoming["payload"].get("tilt", 0.0))
         zoom = float(incoming["payload"].get("zoom", 0.0))
         orientation = camera.get("orientation") or {}
+        # Either correction changes the visual frame presented to the user. Apply
+        # one PTZ inversion when any source says the image is flipped; do not require
+        # both flags and do not cancel them when both happen to be set.
         controls_inverted = any(bool(orientation.get(key, False)) for key in (
             "software_flip_active", "tapo_flip_active", "app_flip_active", "native_inverted",
         ))
         if controls_inverted:
             pan, tilt = -pan, -tilt
+        # Prefer pytapo's native PTZ control for Tapo cameras; fall back to ONVIF
+        # for non-Tapo providers. This avoids the ONVIF WSDL dependency for the
+        # Tapo fleet.
         provider = str(camera.get("provider") or "").lower()
         if provider == "tapo":
             result = tapo_nudge(
@@ -336,7 +342,11 @@ class CoreService(BaseService):
         )
 
     def _native_analytics_event(self, camera_id: str, signal: str, details: dict) -> None:
+        """Receive a trusted event directly from Core's camera-owned subscriber."""
         try:
+            # Some Tapo firmware exposes the vendor's human alert as a generic
+            # ONVIF motion topic. Treat it as a human *candidate*: AI still has to
+            # locate a person before any identity or Unknown event is produced.
             effective_signal = "human_candidate" if signal == "motion_detected" else signal
             self._dispatch_provider_analytics(
                 camera_id, effective_signal, provider="onvif",
