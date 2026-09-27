@@ -35,6 +35,9 @@ from .pki import PKIError, PKI_IDENTITIES, sign_message, verify_message
 
 DEFAULT_DISCOVERY_PORT = 15195
 GATEWAY_IDENTITY = "core"
+#: Shared helper for reading the streaming endpoint persisted by the server.
+from .streamgate import read_stream_json as _read_stream_json  # noqa: E402
+STREAM_SUPPLIER = lambda: _read_stream_json()  # noqa: E731
 # Shared, non-empty connection authkey. The PKI-signed envelopes are the real
 # authority; this only guards the transport framing and MUST match on both ends
 # (an empty authkey makes multiprocessing fall back to a per-process default,
@@ -52,6 +55,9 @@ class Beacon:
     epoch: int
     timestamp: float
     identity: str
+    # Realtime streaming endpoint (separate port; discovered alongside control).
+    stream_port: int | None = None
+    stream_epoch: int = 0
 
 
 def _beacon_body(host: str, port: int, role: str, epoch: int) -> dict:
@@ -81,8 +87,10 @@ class DiscoveryBroadcaster:
         discovery_port: int = DEFAULT_DISCOVERY_PORT,
         role: str = GATEWAY_IDENTITY,
         interval_seconds: int = 3,
+        stream_supplier=None,
     ):
         self._supplier = beacon_supplier
+        self._stream_supplier = stream_supplier
         self.role = role
         self.discovery_port = discovery_port
         self.interval_seconds = max(1, int(interval_seconds))
@@ -103,8 +111,14 @@ class DiscoveryBroadcaster:
             host, port, epoch = self._supplier()
             if port is None:
                 continue
+            body = _beacon_body(host, port, self.role, epoch)
+            if self._stream_supplier is not None:
+                try:
+                    body.update(self._stream_supplier())
+                except Exception:
+                    pass
             beacon = sign_message(
-                _beacon_body(host, port, self.role, epoch),
+                body,
                 self.role,
             )
             payload = json.dumps(beacon, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -182,6 +196,8 @@ class DiscoveryClient:
                     epoch=int(body.get("epoch", 0)),
                     timestamp=float(body.get("timestamp", 0)),
                     identity=identity,
+                    stream_port=int(body["stream_port"]) if body.get("stream_port") else None,
+                    stream_epoch=int(body.get("stream_epoch", 0)),
                 )
                 with self._lock:
                     if self._latest is None or beacon.epoch > self._latest.epoch:
@@ -196,6 +212,28 @@ class DiscoveryClient:
                 self._sock.close()
             except OSError:
                 pass
+
+
+def resolve_stream(
+    *,
+    discovery_port: int = DEFAULT_DISCOVERY_PORT,
+    timeout_seconds: float = 30.0,
+    poll_interval: float = 1.0,
+) -> tuple[str, int]:
+    """Block until a verified beacon advertises a streaming port; return
+    ``(host, stream_port)`` for the realtime media channel."""
+    client = DiscoveryClient(discovery_port=discovery_port)
+    client.start()
+    try:
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            latest = client.latest
+            if latest is not None and latest.stream_port:
+                return latest.host, latest.stream_port
+            time.sleep(poll_interval)
+        raise TimeoutError(f"no FGO stream port on discovery {discovery_port}")
+    finally:
+        client.stop()
 
 
 def resolve_core(
@@ -232,6 +270,7 @@ class NetworkGateway:
         rotate_max_seconds: int = 120,
         broadcast_interval_seconds: int = 3,
         allowed_identities=("client",),
+        stream_supplier=None,
     ):
         self.services_host = services_host or _default_lan_host()
         self.discovery_port = discovery_port
@@ -240,6 +279,7 @@ class NetworkGateway:
         self.rotate_max = max(self.rotate_min, int(rotate_max_seconds))
         self.broadcast_interval = max(1, int(broadcast_interval_seconds))
         self.allowed_identities = tuple(allowed_identities)
+        self.stream_supplier = stream_supplier
         self._stop = threading.Event()
         self._epoch = int(time.time() * 1000)
         self._listener: Listener | None = None
@@ -257,6 +297,7 @@ class NetworkGateway:
             self._beacon,
             discovery_port=self.discovery_port, role=GATEWAY_IDENTITY,
             interval_seconds=self.broadcast_interval,
+            stream_supplier=self.stream_supplier,
         )
         self._broadcaster.start()
         self._acceptor = threading.Thread(target=self._accept_loop, name="FGO-gateway-accept", daemon=True)
@@ -392,12 +433,18 @@ class RemoteClient:
         self.timeout_seconds = timeout_seconds
         self.discover_timeout = discover_timeout_seconds
         self._endpoint: tuple[str, int] | None = None
+        # Guards discovery (only one UDP binder at a time) and the cached endpoint
+        # so the client is safe when several threads call send() concurrently
+        # (e.g. a frame grabber + periodic state refresh). Each send still runs its
+        # own TCP connection; only the shared discovery/endpoint state is serialized.
+        self._lock = threading.RLock()
 
     def refresh_endpoint(self) -> tuple[str, int]:
-        self._endpoint = resolve_core(
-            discovery_port=self.discovery_port, timeout_seconds=self.discover_timeout
-        )
-        return self._endpoint
+        with self._lock:
+            self._endpoint = resolve_core(
+                discovery_port=self.discovery_port, timeout_seconds=self.discover_timeout
+            )
+            return self._endpoint
 
     def send(self, message: dict, *, target: str) -> dict:
         from multiprocessing.connection import Client
@@ -408,7 +455,10 @@ class RemoteClient:
         payload["_remote_target"] = str(target).strip().lower()
         message["payload"] = payload
 
-        host_port = self._endpoint or self.refresh_endpoint()
+        with self._lock:
+            host_port = self._endpoint
+            if host_port is None:
+                host_port = self.refresh_endpoint()
         for attempt in (0, 1):
             try:
                 encoded = sign_message(message, self.identity)
@@ -427,7 +477,8 @@ class RemoteClient:
                 return reply
             except (OSError, EOFError, ConnectionError, TimeoutError):
                 if attempt == 0:
-                    refreshed = self.refresh_endpoint()
+                    with self._lock:
+                        refreshed = self.refresh_endpoint()
                     if refreshed != host_port:
                         host_port = refreshed
                         continue
