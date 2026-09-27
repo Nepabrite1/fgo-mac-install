@@ -18,6 +18,7 @@ envelope framing as the local IPC transport.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import secrets
@@ -35,6 +36,9 @@ from .pki import PKIError, PKI_IDENTITIES, sign_message, verify_message
 
 DEFAULT_DISCOVERY_PORT = 15195
 GATEWAY_IDENTITY = "core"
+#: Unicast the beacon directly to known FGO clients as a reliable supplement to
+#: broadcast, which can fail to leave the host interface on some networks.
+CLIENT_UNICAST = os.environ.get("FGO_CLIENT_UNICAST", "10.0.0.109")
 #: Shared helper for reading the streaming endpoint persisted by the server.
 from .streamgate import read_stream_json as _read_stream_json  # noqa: E402
 STREAM_SUPPLIER = lambda: _read_stream_json()  # noqa: E731
@@ -125,6 +129,11 @@ class DiscoveryBroadcaster:
             destinations = [
                 ("<broadcast>", self.discovery_port),
                 ("255.255.255.255", self.discovery_port),
+                (_subnet_broadcast(), self.discovery_port),
+                (
+                    CLIENT_UNICAST if CLIENT_UNICAST else _subnet_broadcast(),
+                    self.discovery_port,
+                ),
                 ("127.0.0.1", self.discovery_port),
             ]
             for address in destinations:
@@ -496,3 +505,14 @@ def _default_lan_host() -> str:
             return s.getsockname()[0]
     except OSError:
         return "127.0.0.1"
+
+
+def _subnet_broadcast() -> str:
+    """Directed broadcast for the local /24, which macOS sends out the LAN
+    interface reliably (the limited 255.255.255.255 can stay on loopback)."""
+    try:
+        addr = ipaddress.ip_address(_default_lan_host())
+        net = ipaddress.ip_network(str(addr) + "/24", strict=False)
+        return str(net.broadcast_address)
+    except ValueError:
+        return "255.255.255.255"
